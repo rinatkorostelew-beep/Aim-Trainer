@@ -1,0 +1,109 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["aim-trainer*.html", "index.html", ".github/workflows/build.yml"]
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    env:
+      APP_ID: com.mushka.aim
+      APP_NAME: Aim Trainer
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Подготовка проекта
+        run: |
+          f=$(ls aim-trainer*.html 2>/dev/null | sort -V | tail -1)
+          [ -z "$f" ] && f=index.html
+          echo "Беру игру из: $f"
+          mkdir -p www && cp "$f" www/index.html
+          cat > package.json <<'EOF'
+          {
+            "name": "aim-trainer",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": { "@capacitor/android": "^7.0.0", "@capacitor/core": "^7.0.0" },
+            "devDependencies": { "@capacitor/cli": "^7.0.0" }
+          }
+          EOF
+          cat > capacitor.config.json <<EOF
+          {
+            "appId": "$APP_ID",
+            "appName": "$APP_NAME",
+            "webDir": "www",
+            "backgroundColor": "#07080f"
+          }
+          EOF
+
+      - run: npm install
+      - run: npx cap add android
+
+      - name: Горизонтальный режим и полный экран
+        run: |
+          M=android/app/src/main/AndroidManifest.xml
+          sed -i '0,/<activity /s//<activity android:screenOrientation="sensorLandscape" /' "$M"
+          S=android/app/src/main/res/values/styles.xml
+          sed -i 's#<item name="windowNoTitle">true</item>#&\n        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>#' "$S"
+          D=android/app/src/main/java/$(echo "$APP_ID" | tr . /)
+          cat > "$D/MainActivity.java" <<EOF
+          package $APP_ID;
+
+          import android.os.Bundle;
+          import androidx.core.view.WindowCompat;
+          import androidx.core.view.WindowInsetsCompat;
+          import androidx.core.view.WindowInsetsControllerCompat;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  hideBars();
+              }
+
+              @Override
+              public void onWindowFocusChanged(boolean hasFocus) {
+                  super.onWindowFocusChanged(hasFocus);
+                  if (hasFocus) hideBars();
+              }
+
+              private void hideBars() {
+                  WindowInsetsControllerCompat c = WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+                  c.hide(WindowInsetsCompat.Type.systemBars());
+                  c.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+              }
+          }
+          EOF
+
+      - run: npx cap sync android
+
+      - name: Сборка APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Готовый файл
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk aim-trainer.apk
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Сборка ${{ github.run_number }}
+          files: aim-trainer.apk
